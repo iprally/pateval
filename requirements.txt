@@ -1,0 +1,5 @@
+numpy>=1.24
+pytrec-eval-terrier>=0.5
+pyarrow>=14
+huggingface-hub>=0.20
+pytest>=8.0
