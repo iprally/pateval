@@ -1,5 +1,7 @@
 """Tests for the Hugging Face backend on a tiny random BERT built locally; skipped without the `hf` extra."""
 
+import json
+
 import numpy as np
 import pytest
 
@@ -75,3 +77,64 @@ def test_spanned_hf_encoder_returns_unit_vectors_at_any_reading():
         vectors = encoder.encode(texts, role="document", reading=reading)
         assert vectors.shape == (2, 16)
         assert np.allclose(np.linalg.norm(vectors, axis=1), 1.0, atol=1e-5)
+
+
+def test_identity_records_the_prompt_and_the_commit():
+    embedder = _embedder("mean", query_prompt="query :")
+    embedder.revision, embedder.prompt_variant = "1" * 40, "q"
+    identity = embedder.identity()
+    assert identity["query_prompt"] == "query :" and identity["corpus_prompt"] is None
+    assert identity["revision"] == "1" * 40 and identity["prompt"] == "q"
+    assert identity["transformers"] == transformers.__version__
+
+
+def _fake_hub(monkeypatch, tmp_path, files):
+    """`hf_hub_download` serving `files` (name -> JSON-able content) and raising EntryNotFoundError otherwise."""
+    import huggingface_hub
+
+    from huggingface_hub.errors import EntryNotFoundError
+
+    def download(repo_id, filename, **kwargs):
+        if filename not in files:
+            raise EntryNotFoundError(f"{filename} not in {repo_id}")
+        path = tmp_path / filename.replace("/", "_")
+        path.write_text(json.dumps(files[filename]))
+        return str(path)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+
+
+def test_a_dense_head_shipped_only_as_a_pickle_is_refused(monkeypatch, tmp_path):
+    from pateval.encoders.hf import load_dense_head
+
+    modules = [{"idx": 0, "path": "", "type": "sentence_transformers.models.Transformer"}]
+    modules.append({"idx": 2, "path": "2_Dense", "type": "sentence_transformers.models.Dense"})
+    _fake_hub(monkeypatch, tmp_path, {"modules.json": modules, "2_Dense/config.json": {"bias": True}})
+    monkeypatch.setattr(torch, "load", lambda *args, **kwargs: pytest.fail("a pickle was loaded"))
+    with pytest.raises(ValueError, match="refusing to unpickle"):
+        load_dense_head("someone/model", "1" * 40)
+
+
+def test_repository_code_needs_a_pinned_code_revision(monkeypatch):
+    import transformers as hf_transformers
+
+    from pateval.registry import BaselineConfig
+
+    monkeypatch.setattr(
+        hf_transformers.AutoTokenizer, "from_pretrained", lambda *a, **k: pytest.fail("downloaded before the check")
+    )
+    config = BaselineConfig("someone/model", "1" * 40, "mean", 512, trust_remote_code=True)
+    with pytest.raises(ValueError, match="pinned code_revision"):
+        HFSpanEmbedder.from_config("model", config)
+
+
+def test_an_unknown_prompt_variant_fails_before_any_download(monkeypatch):
+    import transformers as hf_transformers
+
+    from pateval.registry import get
+
+    monkeypatch.setattr(
+        hf_transformers.AutoTokenizer, "from_pretrained", lambda *a, **k: pytest.fail("downloaded before the check")
+    )
+    with pytest.raises(KeyError, match="no prompt variant"):
+        HFSpanEmbedder.from_config("patembed-base", get("patembed-base"), prompt="SAME")

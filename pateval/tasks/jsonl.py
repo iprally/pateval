@@ -1,11 +1,12 @@
 """A task from local files, for custom or private benchmarks and for tests.
 
 Queries and corpus are JSON Lines with `{"id": ..., "text": ...}`; qrels is a JSON object mapping query
-id to `{document id: relevance}`.
+id to `{document id: relevance}`. The task records each file's path and SHA-256.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 
@@ -45,4 +46,8 @@ def load(
         query_view=query_view,
         corpus_view=corpus_view,
         main_metric=main_metric,
+        source={
+            role: {"file": str(path), "sha256": hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()}
+            for role, path in (("queries", queries_path), ("corpus", corpus_path), ("qrels", qrels_path))
+        },
     )

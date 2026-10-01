@@ -65,3 +65,38 @@ def test_jsonl_task_loads_local_files(tmp_path):
     (tmp_path / "qrels.json").write_text(json.dumps({"1": {"d": 1}}))
     task = jsonl.load(tmp_path / "q.jsonl", tmp_path / "c.jsonl", tmp_path / "qrels.json", name="local")
     assert task.queries == {"1": "a"} and task.corpus == {"d": "b"} and task.qrels == {"1": {"d": 1}}
+
+
+def test_dapfam_reads_only_the_view_columns_at_the_pinned_commit(monkeypatch):
+    rows = {
+        "queries.parquet": [{"query_id": "q1", "title_en": "T", "abstract_en": "A", "claims_text": "C"}],
+        "corpus.parquet": [{"relevant_id": "d1", "title_en": "U", "abstract_en": "B", "claims_text": "D"}],
+        "qrels_all.parquet": [{"query_id": "q1", "relevant_id": "d1", "relevance_score": 1, "domain_rel": "IN"}],
+    }
+    calls = []
+
+    def read(fname, revision, columns):
+        calls.append((fname, revision, tuple(columns)))
+        return rows[fname]
+
+    monkeypatch.setattr(dapfam, "_read", read)
+    task, extra = dapfam.load_with_scopes(FieldView.TITLE_ABSTRACT_CLAIMS, FieldView.TITLE_ABSTRACT_CLAIMS)
+    assert task.queries == {"q1": "T\nA\nC"} and task.corpus == {"d1": "U\nB\nD"}
+    assert task.qrels_name == "All" and set(extra) == {"In", "Out"} and extra["In"] == {"q1": {"d1": 1}}
+    assert task.source["revision"] == dapfam.HF_REVISION and task.source["corpus_view"] == "TAC"
+    assert {revision for _, revision, _ in calls} == {dapfam.HF_REVISION}
+    assert ("corpus.parquet", dapfam.HF_REVISION, ("relevant_id", "title_en", "abstract_en", "claims_text")) in calls
+
+
+def test_patenteb_local_file_is_recorded_by_digest(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from pateval.tasks import patenteb
+
+    path = tmp_path / "data.parquet"
+    rows = [{"q": "q1", "pos": "d1", "neg": "d2", "q_text": "a", "pos_text": "b", "neg_text": "c"}]
+    pq.write_table(pa.Table.from_pylist(rows), path)
+    task = patenteb.load("in", local_parquet=str(path))
+    assert task.qrels == {"q1": {"d1": 1}} and set(task.corpus) == {"d1", "d2"}
+    assert task.qrels_name == "IN" and len(task.source["sha256"]) == 64

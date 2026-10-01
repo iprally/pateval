@@ -6,7 +6,18 @@ encoded --- as an explicit variable rather than a property of the model. Models 
 vectors.
 """
 
-from pateval.scoring import Result, build_run, check_reproduction, evaluate
-from pateval.tasks import FieldView, Reading, RetrievalTask
+__version__ = "0.3.0"
 
-__all__ = ["FieldView", "Reading", "Result", "RetrievalTask", "build_run", "check_reproduction", "evaluate"]
+from pateval.scoring import Result, build_run, check_reproduction, evaluate  # noqa: E402
+from pateval.tasks import FieldView, Reading, RetrievalTask  # noqa: E402
+
+__all__ = [
+    "FieldView",
+    "Reading",
+    "Result",
+    "RetrievalTask",
+    "__version__",
+    "build_run",
+    "check_reproduction",
+    "evaluate",
+]

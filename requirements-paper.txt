@@ -1,0 +1,9 @@
+# The environment the README's reproduction values were measured in: Python 3.11, one CUDA GPU (torch 2.12.0+cu132).
+numpy==2.4.6
+pyarrow==17.0.0
+pytrec-eval-terrier==0.5.10
+huggingface-hub==1.7.1
+torch==2.12.0
+transformers==5.0.0
+tokenizers==0.22.2
+safetensors==0.7.0

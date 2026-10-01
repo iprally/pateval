@@ -6,6 +6,10 @@ The three things that silently produce a wrong number for a public model are han
 registry entry: the within-span readout (CLS, mean or last token), a projection head shipped as a
 sentence-transformers `Dense` module, and the prompt prefix. The prompt is prepended to every span, since
 each span is an independent encoder input and the prompt conditions the embedding.
+
+Everything is loaded from one resolved repository commit, so tokenizer, weights and projection head always
+belong together and the commit can be recorded next to the score. Repository code runs only when both the
+model commit and the commit of the code are pinned, and no pickle is ever loaded by this module.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from pateval.encoders.base import Role
-from pateval.registry import BaselineConfig
+from pateval.registry import FULL_SHA, BaselineConfig
 
 POOLINGS = ("cls", "mean", "last_token")
 
@@ -49,11 +53,28 @@ class DenseHead:
         raise ValueError(f"unsupported Dense activation {self.activation!r}")
 
 
-def load_dense_head(hf_id: str, revision: str | None = None) -> DenseHead | None:
-    """Load the `Dense` module a sentence-transformers repository declares in `modules.json`, if any."""
-    from huggingface_hub import hf_hub_download
+def resolve_revision(hf_id: str, revision: str) -> str:
+    """The full commit SHA `revision` names; the hub is asked only when it is a branch or tag name."""
+    if FULL_SHA.fullmatch(revision):
+        return revision
+    from huggingface_hub import HfApi
 
-    torch = _require_torch()
+    sha = HfApi().model_info(hf_id, revision=revision).sha
+    if not sha:
+        raise ValueError(f"cannot resolve revision {revision!r} of {hf_id} to a commit")
+    return sha
+
+
+def load_dense_head(hf_id: str, revision: str) -> DenseHead | None:
+    """Load the `Dense` module a sentence-transformers repository declares in `modules.json`, if any.
+
+    Only safetensors weights are read: a repository that ships its projection head as a pickle is refused
+    rather than unpickled.
+    """
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import EntryNotFoundError
+    from safetensors.torch import load_file
+
     with open(hf_hub_download(hf_id, "modules.json", revision=revision)) as handle:
         modules = json.load(handle)
     dense_modules = [m for m in modules if m["type"].endswith("Dense")]
@@ -65,11 +86,10 @@ def load_dense_head(hf_id: str, revision: str | None = None) -> DenseHead | None
     with open(hf_hub_download(hf_id, f"{path}/config.json", revision=revision)) as handle:
         config = json.load(handle)
     try:
-        from safetensors.torch import load_file
-
-        state = load_file(hf_hub_download(hf_id, f"{path}/model.safetensors", revision=revision))
-    except Exception:  # older repositories ship a pickle instead
-        state = torch.load(hf_hub_download(hf_id, f"{path}/pytorch_model.bin", revision=revision), map_location="cpu")
+        weights = hf_hub_download(hf_id, f"{path}/model.safetensors", revision=revision)
+    except EntryNotFoundError as error:
+        raise ValueError(f"{hf_id} ships its {path} weights only as a pickle; refusing to unpickle them") from error
+    state = load_file(weights)
     return DenseHead(
         weight=state["linear.weight"],
         bias=state.get("linear.bias") if config.get("bias", True) else None,
@@ -115,6 +135,12 @@ class HFSpanEmbedder:
     corpus_prompt: str | None = None
     dense: DenseHead | None = None
     device: str = "cpu"
+    # Provenance, recorded with every score and part of the vector-cache key.
+    hf_id: str | None = None
+    revision: str | None = None
+    code_revision: str | None = None
+    prompt_variant: str | None = None
+    dtype: str | None = None
 
     def __post_init__(self) -> None:
         if self.token_pooling not in POOLINGS:
@@ -136,24 +162,33 @@ class HFSpanEmbedder:
         device: str | None = None,
         dtype: str = "float32",
         revision: str | None = None,
+        prompt: str | None = None,
         trust_remote_code: bool | None = None,
     ) -> "HFSpanEmbedder":
-        """Load a registry entry: weights, tokenizer, readout, optional Dense head and prompts.
+        """Load a registry entry: weights, tokenizer, readout, optional Dense head and the prompt variant.
 
-        Repository code is executed only for entries that need it (`config.trust_remote_code`), unless
-        `trust_remote_code` overrides that.
+        `revision` overrides the pinned commit and `prompt` the default variant (`none` runs unprompted); both
+        end up in the record. Repository code is executed only for entries that need it
+        (`config.trust_remote_code`, unless `trust_remote_code` overrides that), and only with the code's
+        commit pinned in `config.code_revision`.
         """
         torch = _require_torch()
         from transformers import AutoModel, AutoTokenizer
 
-        device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        prompt_variant, prompt_texts = config.prompt(prompt)  # an unknown variant fails before any download
         trust = config.trust_remote_code if trust_remote_code is None else trust_remote_code
-        tokenizer = AutoTokenizer.from_pretrained(config.hf_id, revision=revision, trust_remote_code=trust)
+        if trust and not (config.code_revision and FULL_SHA.fullmatch(config.code_revision)):
+            raise ValueError(f"{name}: refusing to run repository code without a pinned code_revision")
+        commit = resolve_revision(config.hf_id, revision or config.revision)
+        remote = {"trust_remote_code": True, "code_revision": config.code_revision} if trust else {}
+
+        device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        tokenizer = AutoTokenizer.from_pretrained(config.hf_id, revision=commit, **remote)
         model = AutoModel.from_pretrained(
-            config.hf_id, revision=revision, trust_remote_code=trust, **{_dtype_argument(): getattr(torch, dtype)}
+            config.hf_id, revision=commit, **remote, **{_dtype_argument(): getattr(torch, dtype)}
         )
         model = model.to(device).eval()
-        dense = load_dense_head(config.hf_id, revision) if config.dense_head else None
+        dense = load_dense_head(config.hf_id, commit) if config.dense_head else None
         if dense is not None:
             dense = DenseHead(
                 dense.weight.to(device, model.dtype),
@@ -166,11 +201,36 @@ class HFSpanEmbedder:
             model=model,
             token_pooling=config.token_pooling,
             max_span_length=config.max_span_length,
-            query_prompt=config.query_prompt,
-            corpus_prompt=config.corpus_prompt,
+            query_prompt=prompt_texts.query,
+            corpus_prompt=prompt_texts.document,
             dense=dense,
             device=device,
+            hf_id=config.hf_id,
+            revision=commit,
+            code_revision=config.code_revision if trust else None,
+            prompt_variant=prompt_variant,
+            dtype=dtype,
         )
+
+    def identity(self) -> dict[str, Any]:
+        """Everything that determines the vectors, for the record and the vector-cache key."""
+        import torch
+        import transformers
+
+        return {
+            "hf_id": self.hf_id,
+            "revision": self.revision,
+            "code_revision": self.code_revision,
+            "token_pooling": self.token_pooling,
+            "max_span_length": self.max_span_length,
+            "dense_head": None if self.dense is None else self.dense.activation,
+            "prompt": self.prompt_variant,
+            "query_prompt": self.query_prompt,
+            "corpus_prompt": self.corpus_prompt,
+            "dtype": self.dtype,
+            "torch": torch.__version__,
+            "transformers": transformers.__version__,
+        }
 
     def _encode_prompt(self, prompt: str | None) -> list[int]:
         if not prompt:

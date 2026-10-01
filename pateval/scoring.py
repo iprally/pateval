@@ -5,7 +5,7 @@ comparable to a number produced there. Three behaviours are deliberate:
 
 * **The query's own document is excluded from its ranking.** In family-level patent benchmarks a query is
   usually also a corpus entry; leaving it in inflates every metric uniformly and silently.
-* **A reproduction gate.** `check_reproduction` compares a measured value against a published one before
+* **A reproduction check.** `check_reproduction` compares a measured value against a published one before
   downstream numbers are trusted. What a published protocol actually was can often only be established by
   reproducing one of its baselines closely; without that anchor a harness bug is indistinguishable from a
   finding.

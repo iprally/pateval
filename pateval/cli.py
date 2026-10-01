@@ -5,16 +5,19 @@
     pateval run --task patenteb --regime IN --local-parquet retrieval_IN/test/data.parquet --encoder ...
     pateval run --task jsonl --queries q.jsonl --corpus c.jsonl --qrels qrels.json --encoder my_pkg.eval:Encoder
     pateval matrix --encoder registry:paecter --cache ./vectors --out results.jsonl
-    pateval reproduce --encoder registry:paecter
+    pateval reproduce --baseline paecter            # or --baseline all
     pateval registry list | show paecter | verify paecter
 
 An encoder is named by a spec (see `pateval.encoders.plugins`); `--encoder-arg key=value` passes
 keyword arguments to its factory, so a model whose code lives in another package needs no change here.
+For registry models the arguments are `prompt` (a variant name, or `none`), `revision`, `dtype`, `device`
+and `batch_size`.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 
 from typing import Any, Sequence
@@ -35,6 +38,12 @@ MATRIX_CONFIGS: tuple[tuple[FieldView, FieldView], ...] = (
     (FieldView.CLAIMS, FieldView.TITLE_ABSTRACT_CLAIMS),
     (FieldView.CLAIMS, FieldView.CLAIMS),
 )
+
+# The calibration cell: the configuration the published DAPFAM baselines were measured in.
+CALIBRATION_TASK = "TAC->TAC"
+CALIBRATION_READING = "1x512"
+# Encoder arguments `reproduce` accepts: they change speed or numerical precision, not the configuration.
+CALIBRATION_ARGUMENTS = frozenset({"batch_size", "device", "dtype"})
 
 
 def parse_reading(text: str, across_span_pooling: str = "mean") -> Reading:
@@ -69,15 +78,19 @@ def _cast(value: str) -> Any:
     return value
 
 
-def _add_encoder_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--encoder", required=True, help="registry:<name>, <module>:<attribute>, or an entry point")
+def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--encoder-arg", action="append", default=[], metavar="KEY=VALUE")
-    parser.add_argument("--query-reading", default="1x512", help="spans x span length for queries")
-    parser.add_argument("--doc-reading", default="8x512", help="spans x span length for documents")
-    parser.add_argument("--across-span-pooling", default="mean", choices=ACROSS_SPAN_POOLINGS)
     parser.add_argument("--bootstrap", type=int, default=1000, help="bootstrap resamples over queries; 0 disables")
     parser.add_argument("--cache", help="directory for encoded vectors, reused across configurations")
     parser.add_argument("--out", help="JSON Lines file to append records to")
+
+
+def _add_encoder_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--encoder", required=True, help="registry:<name>, <module>:<attribute>, or an entry point")
+    parser.add_argument("--query-reading", default="1x512", help="spans x span length for queries")
+    parser.add_argument("--doc-reading", default="8x512", help="spans x span length for documents")
+    parser.add_argument("--across-span-pooling", default="mean", choices=ACROSS_SPAN_POOLINGS)
+    _add_common_arguments(parser)
 
 
 def _add_task_arguments(parser: argparse.ArgumentParser) -> None:
@@ -106,7 +119,8 @@ def _load_task(args: argparse.Namespace) -> tuple[RetrievalTask, dict[str, dict[
 
 
 def _evaluate(args: argparse.Namespace, task: RetrievalTask, extra_qrels: dict) -> EvaluationRecord:
-    encoder = load_encoder(args.encoder, **parse_encoder_args(args.encoder_arg))
+    encoder_arguments = parse_encoder_args(args.encoder_arg)
+    encoder = load_encoder(args.encoder, **encoder_arguments)
     cache = VectorCache(args.cache) if args.cache else None
     record = evaluate_encoder(
         task,
@@ -117,7 +131,8 @@ def _evaluate(args: argparse.Namespace, task: RetrievalTask, extra_qrels: dict) 
         bootstrap=args.bootstrap,
         cache=cache,
         extra_qrels=extra_qrels,
-        extra={"encoder_spec": args.encoder},
+        encoder_spec=args.encoder,
+        encoder_arguments=encoder_arguments,
     )
     if args.out:
         append_record(args.out, record)
@@ -139,31 +154,104 @@ def cmd_matrix(args: argparse.Namespace) -> int:
     return 0
 
 
+def calibration_baselines() -> list[str]:
+    """Registry models with a gated published value in the calibration cell, in registry order."""
+    gated = {
+        ref.model
+        for ref in registry.references(benchmark="DAPFAM", task=CALIBRATION_TASK, reading=CALIBRATION_READING)
+        if ref.gated
+    }
+    return [name for name in registry.REGISTRY if name in gated]
+
+
 def cmd_reproduce(args: argparse.Namespace) -> int:
-    """Run the calibration cell (PaECTER, TAC->TAC, 512 tokens per side) and gate on the published value."""
-    args.task, args.query_view, args.corpus_view, args.scopes = "dapfam", "TAC", "TAC", "All"
-    args.query_reading = args.doc_reading = "1x512"
-    task, extra_qrels = _load_task(args)
-    record = _evaluate(args, task, extra_qrels)
-    print(record.summary())
-    published = registry.PUBLISHED[("paecter", "DAPFAM", "TAC->TAC@512/All/ndcg@100")]
-    ok, message = scoring.check_reproduction(record.main_score("main", task.main_metric).value, published)
-    print(message)
-    return 0 if ok else 1
+    """Run published baselines in the calibration cell and compare each with its own published values.
+
+    The cell is DAPFAM TAC->TAC at 512 tokens per side, scored under All, In and Out from one ranking. A
+    baseline runs once per prompt variant its references name. Gated references decide the exit code;
+    the others are printed next to the measurement.
+    """
+    names = calibration_baselines() if "all" in args.baseline else list(dict.fromkeys(args.baseline))
+    encoder_arguments = parse_encoder_args(args.encoder_arg)
+    changed = sorted(set(encoder_arguments) - CALIBRATION_ARGUMENTS)
+    if changed:
+        raise SystemExit(f"reproduce runs the published configuration; it does not take {changed}")
+    plans: dict[str, list[registry.Reference]] = {}
+    for name in names:
+        refs = registry.references(name, "DAPFAM", task=CALIBRATION_TASK, reading=CALIBRATION_READING)
+        if not refs:
+            raise SystemExit(f"no published DAPFAM {CALIBRATION_TASK} value is recorded for {name!r}")
+        plans[name] = refs
+
+    task, extra_qrels = dapfam.load_with_scopes(FieldView.TITLE_ABSTRACT_CLAIMS, FieldView.TITLE_ABSTRACT_CLAIMS)
+    print(task.summary())
+    cache = VectorCache(args.cache) if args.cache else None
+    reading = parse_reading(CALIBRATION_READING)
+    failed: list[str] = []
+    for name, refs in plans.items():
+        for variant in dict.fromkeys(ref.prompt for ref in refs):
+            spec = f"registry:{name}"
+            arguments = dict(encoder_arguments, prompt=variant)
+            record = evaluate_encoder(
+                task,
+                load_encoder(spec, **arguments),
+                query_reading=reading,
+                doc_reading=reading,
+                bootstrap=args.bootstrap,
+                cache=cache,
+                extra_qrels=extra_qrels,
+                encoder_spec=spec,
+                encoder_arguments=arguments,
+            )
+            print(record.summary())
+            checks = []
+            for ref in (ref for ref in refs if ref.prompt == variant):
+                measured = record.main_score(ref.scope, ref.metric).value
+                ok, message = scoring.check_reproduction(measured, ref.value)
+                label = f"{name} [prompt {record.encoder_identity.get('prompt', variant)}] {ref.scope}"
+                print(f"  {label}: {message}{'' if ref.gated else ' (printed, not gated)'}")
+                checks.append(
+                    {
+                        "scope": ref.scope,
+                        "metric": ref.metric,
+                        "published": ref.value,
+                        "source": ref.source,
+                        "measured": measured,
+                        "relative_gap": (measured - ref.value) / ref.value,
+                        "gated": ref.gated,
+                        "ok": ok,
+                    }
+                )
+                if ref.gated and not ok:
+                    failed.append(label)
+            record.extra["reproduction"] = checks
+            if args.out:
+                append_record(args.out, record)
+    print("all gated values reproduce" if not failed else f"DOES NOT REPRODUCE: {', '.join(failed)}")
+    return 1 if failed else 0
 
 
 def cmd_registry(args: argparse.Namespace) -> int:
     if args.action == "list":
         for name, config in registry.REGISTRY.items():
-            print(f"{name:<18} {config.hf_id:<45} {config.token_pooling:<10} max {config.max_span_length}")
+            print(
+                f"{name:<18} {config.hf_id:<45} {config.token_pooling:<10} max {config.max_span_length:<5} "
+                f"prompt {config.default_prompt}"
+            )
         return 0
     if args.action == "show":
         config = registry.get(args.name)
-        for field, value in vars(config).items():
-            print(f"{field}: {value}")
-        for benchmark in ("DAPFAM", "PatenTEB"):
-            for configuration, value in registry.published_for(args.name, benchmark).items():
-                print(f"published {benchmark} {configuration}: {value}")
+        for field in dataclasses.fields(config):
+            if field.name == "prompts":
+                for variant, prompt in config.prompts.items():
+                    print(f"prompt {variant} ({prompt.origin}): query={prompt.query!r} document={prompt.document!r}")
+                continue
+            print(f"{field.name}: {getattr(config, field.name)}")
+        for ref in registry.references(args.name):
+            print(
+                f"published {ref.benchmark} {ref.task} {ref.reading} {ref.scope} {ref.metric} prompt={ref.prompt}: "
+                f"{ref.value}{' (gated)' if ref.gated else ''} -- {ref.source}"
+            )
         return 0
     problems = registry.verify_against_hub(args.name)
     print("\n".join(problems) if problems else f"{args.name}: registry entry agrees with the model repository")
@@ -188,11 +276,16 @@ def build_parser() -> argparse.ArgumentParser:
     matrix.set_defaults(func=cmd_matrix, metric=None)
 
     reproduce = subparsers.add_parser(
-        "reproduce", help="run the PaECTER calibration cell and compare with its published value"
+        "reproduce", help="run published baselines in their published configuration and compare with their values"
     )
-    _add_encoder_arguments(reproduce)
-    reproduce.add_argument("--max-chars", type=int)
-    reproduce.set_defaults(func=cmd_reproduce, metric=None)
+    reproduce.add_argument(
+        "--baseline",
+        action="append",
+        default=None,
+        help="registry model with a published DAPFAM value (repeatable), or 'all'; default paecter",
+    )
+    _add_common_arguments(reproduce)
+    reproduce.set_defaults(func=cmd_reproduce)
 
     reg = subparsers.add_parser("registry", help="inspect the published-configuration registry")
     reg.add_argument("action", choices=("list", "show", "verify"))
@@ -205,6 +298,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "registry" and args.action != "list" and not args.name:
         raise SystemExit("registry show/verify need a model name")
+    if args.command == "reproduce" and not args.baseline:
+        args.baseline = ["paecter"]
     return args.func(args)
 
 

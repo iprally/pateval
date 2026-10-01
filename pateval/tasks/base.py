@@ -18,6 +18,8 @@ from __future__ import annotations
 import dataclasses
 import enum
 
+from typing import Any
+
 
 class FieldView(enum.Enum):
     """Which parts of a patent a side of the task is built from."""
@@ -47,6 +49,9 @@ class Reading:
     def __str__(self) -> str:
         return f"{self.num_spans}x{self.span_length}"
 
+    def as_dict(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
 
 @dataclasses.dataclass
 class RetrievalTask:
@@ -56,6 +61,9 @@ class RetrievalTask:
     as irrelevant by the metric, which matters for domain-partitioned qrel sets: under an out-of-domain
     partition an in-domain relevant document counts as a false positive, so absolute scores there are
     comparable between systems but not to the unpartitioned number.
+
+    `qrels_name` is the name its scores are recorded under (DAPFAM's scope, PatenTEB's regime); `source` says
+    where the data came from (repository and commit, or file and digest) and how it was rendered.
     """
 
     name: str
@@ -65,6 +73,8 @@ class RetrievalTask:
     query_view: FieldView
     corpus_view: FieldView
     main_metric: str = "ndcg_cut_100"
+    qrels_name: str = "main"
+    source: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
         unknown = set(self.qrels) - set(self.queries)

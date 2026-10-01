@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from typing import Literal, Protocol, Sequence, runtime_checkable
+from typing import Any, Literal, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 
@@ -23,6 +23,10 @@ class TextEncoder(Protocol):
     package and pass `module:attribute` to `load_encoder`. `reading` tells the encoder how much text the
     experiment intends it to read; an encoder that fixes its own reading should validate the request and
     raise rather than silently read something else, because the reading is recorded next to every score.
+
+    An encoder may also define `identity() -> dict`, returning whatever determines its vectors that its name,
+    specification and arguments do not show, such as a digest of weights loaded from a path that can be
+    overwritten. It is recorded with every score and is part of the vector-cache key.
     """
 
     name: str
@@ -108,6 +112,10 @@ class SpannedEncoder:
     @property
     def name(self) -> str:
         return self.embedder.name
+
+    def identity(self) -> dict[str, Any]:
+        describe = getattr(self.embedder, "identity", None)
+        return dict(describe()) if callable(describe) else {}
 
     def encode(self, texts: Sequence[str], *, role: Role, reading: Reading) -> np.ndarray:
         if reading.span_length > self.embedder.max_span_length:
