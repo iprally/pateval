@@ -87,16 +87,19 @@ The `registry` command:
 `pateval reproduce --baseline all` runs each baseline that has a published DAPFAM value in the
 configuration it was published in: TAC->TAC, 512 tokens per side, nDCG@100. It compares All with the
 published value and fails if any gated value is more than 2% off. In, Out and values below 0.1 are
-printed but not gated. Measured on one GPU in float32 with `requirements-paper.txt`:
+printed but not gated. Measured on one GPU in float32 with `requirements-paper.txt` (brackets: bootstrap
+95% confidence intervals over queries):
 
-| Baseline | Prompt | Measured (All / In / Out) | Published |
-|---|---|---|---|
-| PaECTER | none | to be filled from the reproduction run | 0.343 / 0.387 / 0.060 |
-| patembed-base | MIXED | | 0.370 |
-| patembed-base | none | | 0.352 |
-| patembed-large | MIXED | | 0.377 |
-| patembed-large | none | | 0.044 (not gated) |
-| BERT-for-Patents | none | | 0.228 |
+| Baseline | Prompt | All | In | Out | Published |
+|---|---|---|---|---|---|
+| PaECTER | none | 0.3424 [0.3278, 0.3548] | 0.3860 | 0.0598 | 0.343 / 0.387 / 0.060 |
+| patembed-base | MIXED | 0.3654 [0.3506, 0.3776] | 0.4134 | 0.0609 | 0.370 |
+| patembed-base | none | 0.3512 [0.3365, 0.3633] | 0.3970 | 0.0602 | 0.352 |
+| patembed-large | MIXED | 0.3721 [0.3571, 0.3841] | 0.4210 | 0.0615 | 0.377 |
+| patembed-large | none | 0.0407 [0.0368, 0.0446] | 0.0457 | 0.0053 | 0.044 (not gated) |
+| BERT-for-Patents | none | 0.2260 [0.2159, 0.2359] | 0.2532 | 0.0411 | 0.228 |
+
+Every gated value reproduces to within 1.3%.
 
 Published values are from the PatenTEB paper (arXiv:2510.22264, Table 16), whose "with prompt" column
 does not name the variant; MIXED is the best of the three on this task.
