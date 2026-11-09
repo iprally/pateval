@@ -6,7 +6,7 @@ encoded --- as an explicit variable rather than a property of the model. Models 
 vectors.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from pateval.scoring import Result, build_run, check_reproduction, evaluate  # noqa: E402
 from pateval.tasks import FieldView, Reading, RetrievalTask  # noqa: E402

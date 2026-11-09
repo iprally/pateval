@@ -171,6 +171,11 @@ def build_encoder(checkpoint: str) -> MyEncoder:
 pateval run --task dapfam --encoder my_models.eval:build_encoder --encoder-arg checkpoint=best.ckpt ...
 ```
 
+If your model combines its spans with a pooling it learned, such as attention over spans, rather than an
+average, run it with `--across-span-pooling learned` so that every record says so. `SpannedEncoder`
+refuses that reading, because the harness only averages or max-pools spans, and your encoder should refuse
+the poolings it does not do.
+
 If your model embeds one span at a time and you want the harness to do the reading, implement
 `SpanEmbedder` instead (`tokenize`, `overhead_tokens`, `embed_spans`, `max_span_length`) and wrap it in
 `SpannedEncoder`; `pateval/testing.py` is a complete, dependency-free example. An installed package can

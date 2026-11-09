@@ -5,7 +5,7 @@ import json
 import pytest
 
 from pateval import cli, registry
-from pateval.tasks import FieldView, RetrievalTask
+from pateval.tasks import FieldView, Reading, RetrievalTask
 from pateval.testing import hashing_encoder
 
 
@@ -81,6 +81,50 @@ def test_parse_reading_and_encoder_args():
         "rate": 0.5,
         "name": "x",
     }
+
+
+class _SelfPoolingEncoder:
+    """An encoder that pools its own spans, so it accepts only the learned reading."""
+
+    name = "self-pooling"
+
+    def encode(self, texts, *, role, reading):
+        if reading.across_span_pooling != "learned":
+            raise ValueError(f"this encoder pools its own spans, not with {reading.across_span_pooling!r}")
+        return hashing_encoder(dim=32).encode(texts, role=role, reading=Reading(reading.num_spans, reading.span_length))
+
+
+def test_run_records_a_learned_reading(tmp_path, monkeypatch):
+    _write_task(tmp_path)
+    monkeypatch.setattr(cli, "load_encoder", lambda spec, **kwargs: _SelfPoolingEncoder())
+    out = tmp_path / "results.jsonl"
+    code = cli.main(
+        [
+            "run",
+            "--task",
+            "jsonl",
+            "--queries",
+            str(tmp_path / "queries.jsonl"),
+            "--corpus",
+            str(tmp_path / "corpus.jsonl"),
+            "--qrels",
+            str(tmp_path / "qrels.json"),
+            "--encoder",
+            "my_models.eval:build_encoder",
+            "--query-reading",
+            "4x512",
+            "--across-span-pooling",
+            "learned",
+            "--bootstrap",
+            "0",
+            "--out",
+            str(out),
+        ]
+    )
+    assert code == 0
+    record = json.loads(out.read_text())
+    assert record["query_reading"] == {"num_spans": 4, "span_length": 512, "across_span_pooling": "learned"}
+    assert record["doc_reading"]["across_span_pooling"] == "learned"
 
 
 def test_registry_list_runs(capsys):

@@ -40,6 +40,20 @@ def test_unknown_pooling_raises():
         pool_spans(np.ones((1, 2), dtype=np.float32), "median")
 
 
+def test_learned_pooling_is_left_to_the_encoder():
+    with pytest.raises(ValueError, match="the encoder's own"):
+        pool_spans(np.ones((2, 2), dtype=np.float32), "learned")
+
+
+def test_the_harness_refuses_a_learned_reading_before_embedding_anything():
+    class NothingEmbedded(HashingSpanEmbedder):
+        def embed_spans(self, spans, *, role):
+            raise AssertionError("no span should be embedded")
+
+    with pytest.raises(ValueError, match="cannot apply 'learned'"):
+        SpannedEncoder(NothingEmbedded()).encode(["a b c"], role="document", reading=Reading(2, 8, "learned"))
+
+
 def test_hashing_encoder_satisfies_the_protocol():
     assert isinstance(hashing_encoder(), TextEncoder)
 

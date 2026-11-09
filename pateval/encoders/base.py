@@ -12,7 +12,11 @@ from pateval.tasks.base import Reading
 
 Role = Literal["query", "document"]
 
-ACROSS_SPAN_POOLINGS = ("mean", "normalized_mean", "max")
+# The across-span poolings the harness applies itself (`pool_spans`).
+HARNESS_POOLINGS = ("mean", "normalized_mean", "max")
+# An encoder that combines its spans with a pooling it learned, such as attention over spans.
+LEARNED_POOLING = "learned"
+ACROSS_SPAN_POOLINGS = (*HARNESS_POOLINGS, LEARNED_POOLING)
 
 
 @runtime_checkable
@@ -23,6 +27,8 @@ class TextEncoder(Protocol):
     package and pass `module:attribute` to `load_encoder`. `reading` tells the encoder how much text the
     experiment intends it to read; an encoder that fixes its own reading should validate the request and
     raise rather than silently read something else, because the reading is recorded next to every score.
+    An encoder that pools its spans with a learned pooling is read with `across_span_pooling="learned"`,
+    and refuses the poolings the harness applies; one that averages its span vectors refuses `learned`.
 
     An encoder may also define `identity() -> dict`, returning whatever determines its vectors that its name,
     specification and arguments do not show, such as a digest of weights loaded from a path that can be
@@ -100,7 +106,9 @@ def pool_spans(span_vectors: np.ndarray, method: str) -> np.ndarray:
         return (span_vectors / norms).mean(axis=0)
     if method == "max":
         return span_vectors.max(axis=0)
-    raise ValueError(f"unknown across-span pooling {method!r}; expected one of {ACROSS_SPAN_POOLINGS}")
+    if method == LEARNED_POOLING:
+        raise ValueError(f"{LEARNED_POOLING!r} pooling is the encoder's own; the harness applies {HARNESS_POOLINGS}")
+    raise ValueError(f"unknown across-span pooling {method!r}; expected one of {HARNESS_POOLINGS}")
 
 
 def l2_normalize(vectors: np.ndarray) -> np.ndarray:
@@ -131,6 +139,11 @@ class SpannedEncoder:
         return dict(describe()) if callable(describe) else {}
 
     def encode(self, texts: Sequence[str], *, role: Role, reading: Reading) -> np.ndarray:
+        if reading.across_span_pooling not in HARNESS_POOLINGS:
+            raise ValueError(
+                f"{self.embedder.name} embeds one span at a time and the harness pools its spans, with one of "
+                f"{HARNESS_POOLINGS}; it cannot apply {reading.across_span_pooling!r}."
+            )
         if reading.span_length > self.embedder.max_span_length:
             raise ValueError(
                 f"{self.embedder.name} cannot read {reading.span_length}-token spans in one pass "

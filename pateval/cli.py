@@ -89,7 +89,12 @@ def _add_encoder_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--encoder", required=True, help="registry:<name>, <module>:<attribute>, or an entry point")
     parser.add_argument("--query-reading", default="1x512", help="spans x span length for queries")
     parser.add_argument("--doc-reading", default="8x512", help="spans x span length for documents")
-    parser.add_argument("--across-span-pooling", default="mean", choices=ACROSS_SPAN_POOLINGS)
+    parser.add_argument(
+        "--across-span-pooling",
+        default="mean",
+        choices=ACROSS_SPAN_POOLINGS,
+        help="how span vectors are combined; 'learned' for an encoder that pools its own spans",
+    )
     _add_common_arguments(parser)
 
 

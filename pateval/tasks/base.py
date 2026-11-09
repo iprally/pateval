@@ -35,7 +35,9 @@ class Reading:
     """How much of a text a system encoded, and how the pieces were combined.
 
     `num_spans=1` with `span_length=512` is the conventional single truncation; `num_spans=8` with
-    `span_length=512` reads 4,096 tokens as eight independently encoded pieces.
+    `span_length=512` reads 4,096 tokens as eight independently encoded pieces. `across_span_pooling` is
+    `mean`, `normalized_mean` or `max` when the harness combines the span vectors, and `learned` when the
+    encoder combines them with a pooling it learned.
     """
 
     num_spans: int
